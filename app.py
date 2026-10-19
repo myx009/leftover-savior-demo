@@ -3,12 +3,13 @@ import json
 import csv
 import os
 import datetime
+import re
 from openai import OpenAI
 
 st.title("青空冰箱 Clear Fridge")
 st.caption("你的智能库存与家常菜谱管家")
 
-# --- 侧边栏：兼容云端 Secrets 和本地输入 ---
+# --- 侧边栏 ---
 with st.sidebar:
     st.header("配置")
     try:
@@ -16,21 +17,16 @@ with st.sidebar:
         st.success("API Key 已自动加载")
     except Exception:
         api_key = st.text_input("API Key", type="password", help="输入 DeepSeek 或兼容 OpenAI 格式的 Key")
-        
     model_name = st.text_input("模型", value="deepseek-chat")
     base_url = st.text_input("Base URL", value="https://api.deepseek.com")
 
 st.subheader("1. 输入现有食材")
-ingredients = st.text_area(
-    "食材列表（最多10种）",
-    placeholder="例如：半个土豆、一根火腿肠、两个鸡蛋、半个洋葱",
-    height=100
-)
+ingredients = st.text_area("食材列表（最多10种）", placeholder="例如：半个土豆、一根火腿肠、两个鸡蛋、半个洋葱", height=100)
 
 st.subheader("2. 设置硬约束")
 preset_cookware = ["电煮锅", "微波炉", "平底锅", "烤箱", "空气炸锅", "电饭煲"]
 selected_cookware = st.multiselect("可用厨具（至少选1个）", preset_cookware)
-custom_cookware = st.text_input("自定义厨具（可选，多个用逗号分隔）", placeholder="例如：电饼铛, 蒸锅")
+custom_cookware = st.text_input("自定义厨具（可选，多个用逗号分隔）")
 custom_cookware_list = [c.strip() for c in custom_cookware.split(",") if c.strip()] if custom_cookware else []
 cookware = selected_cookware + custom_cookware_list
 
@@ -44,14 +40,12 @@ dietary = st.text_input("忌口 / 过敏（可留空）", placeholder="例如：
 
 st.divider()
 
-# --- 反馈落盘函数 ---
 def save_feedback(recipe_name, action):
     try:
         _ = st.secrets["OPENAI_API_KEY"]
         is_cloud = True
     except Exception:
         is_cloud = False
-        
     if not is_cloud:
         file_exists = os.path.isfile("feedback.csv")
         with open("feedback.csv", "a", newline="", encoding="utf-8-sig") as f:
@@ -60,40 +54,60 @@ def save_feedback(recipe_name, action):
                 writer.writerow(["timestamp", "recipe_name", "action"])
             writer.writerow([datetime.datetime.now().isoformat(), recipe_name, action])
 
-# --- 渲染卡片函数（增加超强容错） ---
+# --- 辅助清洗函数 ---
+def safe_list(val):
+    """强制将任何类型转为字符串列表"""
+    if isinstance(val, list):
+        return [str(v) for v in val]
+    elif isinstance(val, str):
+        return [val]
+    return []
+
+def clean_time(val):
+    """提取数字，比如 '28分钟' -> 28"""
+    if isinstance(val, int) or isinstance(val, float):
+        return val
+    if isinstance(val, str):
+        nums = re.findall(r'\d+', val)
+        if nums:
+            return int(nums[0])
+    return "未知"
+
+# --- 渲染卡片函数 ---
 def render_recipes(recipes, all_recipes):
     cols = st.columns(3)
     for i, col in enumerate(cols):
         with col:
             recipe = recipes[i]
-            # 防御性提取：如果缺字段，给默认值，绝对不让页面崩溃
             name = recipe.get("name", f"神秘菜谱 {i+1}")
-            time_str = recipe.get("time", "未知")
-            cookware_list = recipe.get("cookware", [])
-            if not isinstance(cookware_list, list): cookware_list = [str(cookware_list)]
+            # 清洗时间
+            time_val = clean_time(recipe.get("time", "未知"))
+            
+            # 清洗厨具
+            cookware_list = safe_list(recipe.get("cookware", []))
             cookware_str = ', '.join(cookware_list) if cookware_list else "未知"
             
             st.subheader(name)
-            st.caption(f"耗时: {time_str}分钟 | 厨具: {cookware_str}")
+            st.caption(f"耗时: {time_val}分钟 | 厨具: {cookware_str}")
             
-            st.write(f"**主料：** {', '.join(recipe.get('ingredients', []))}")
-            st.write(f"**调料：** {', '.join(recipe.get('seasonings', []))}")
+            # 清洗主料和调料
+            ing_list = safe_list(recipe.get("ingredients", []))
+            sea_list = safe_list(recipe.get("seasonings", []))
+            st.write(f"**主料：** {', '.join(ing_list)}")
+            st.write(f"**调料：** {', '.join(sea_list) if sea_list else '无'}")
             
-            unused = recipe.get("unused_ingredients", [])
+            unused = safe_list(recipe.get("unused_ingredients", []))
             if unused:
                 st.warning(f"**剩余食材：** {', '.join(unused)}（可留作下顿）")
 
             st.write("**步骤：**")
-            for step in recipe.get("steps", ["暂无步骤"]):
+            for step in safe_list(recipe.get("steps", ["暂无步骤"])):
                 st.write(step)
 
             st.info(f"**注意事项：** {recipe.get('notes', '无')}")
             st.warning(f"**安全提示：** {recipe.get('safety', '无')}")
-            
-            nutrition = recipe.get("nutrition_notes", "未提供")
-            st.success(f"**营养分析：** {nutrition}\n\n*（AI 粗略定性分析，仅供参考）*")
+            st.success(f"**营养分析：** {recipe.get('nutrition_notes', '未提供')}\n\n*（AI 粗略定性分析，仅供参考）*")
 
-            # 三列按钮布局
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("可行", key=f"good_{i}"):
@@ -105,7 +119,6 @@ def render_recipes(recipes, all_recipes):
                     st.toast(f"已反馈：{name} 不可行")
             with col3:
                 if st.button("换一个 🔄", key=f"change_{i}"):
-                    # 收集黑名单
                     blacklist = [r.get("name", "") for r in all_recipes if r.get("name") != name]
                     blacklist += st.session_state.history_recipes
                     blacklist_str = "、".join(list(set(blacklist)))
@@ -123,7 +136,7 @@ def render_recipes(recipes, all_recipes):
                             要求：
                             1. 生成1个全新的家常菜，耗时在 {max_time-5 if max_time>5 else 1}-{max_time} 分钟之间。
                             2. 必须使用可用厨具，无高危操作。
-                            3. 必须返回 JSON 格式，包含完整字段（name, time, cookware, ingredients, steps等）。
+                            3. 必须返回 JSON 格式，严格遵循字段规范（见下文）。
                             """
                             res = client.chat.completions.create(
                                 model=model_name,
@@ -134,7 +147,6 @@ def render_recipes(recipes, all_recipes):
                             
                             parsed_new = json.loads(res.choices[0].message.content)
                             
-                            # 深度清洗：寻找包含 "name" 的那一层字典
                             new_recipe = parsed_new
                             if isinstance(parsed_new, dict):
                                 if "name" not in parsed_new:
@@ -146,7 +158,6 @@ def render_recipes(recipes, all_recipes):
                                             new_recipe = val[0]
                                             break
                             
-                            # 如果依然没有 name 字段，说明模型彻底发疯，直接报错
                             if "name" not in new_recipe:
                                 st.error("AI 返回数据异常，请重试。")
                             else:
@@ -157,11 +168,9 @@ def render_recipes(recipes, all_recipes):
                         except Exception as e:
                             st.error(f"生成失败：{e}")
 
-# --- 初始化历史记录 ---
 if "history_recipes" not in st.session_state:
     st.session_state.history_recipes = []
 
-# --- 主流程 ---
 if st.button("生成菜谱", type="primary"):
     if not ingredients:
         st.error("请先输入食材。")
@@ -175,18 +184,18 @@ if st.button("生成菜谱", type="primary"):
                 client = OpenAI(api_key=api_key, base_url=base_url)
                 history_str = "、".join(st.session_state.history_recipes[-10:]) if st.session_state.history_recipes else "无"
 
+                # 这里在 Prompt 中强化了格式要求
                 prompt = f"""
                 你是一个专为独居人士设计的家常菜谱生成助手。
                 用户现有食材：{ingredients}
                 可用厨具：{', '.join(cookware)}
                 最长烹饪时间限制：{max_time}分钟
                 忌口/过敏：{dietary if dietary else '无'}
-                
                 【历史已推荐菜品】：{history_str}
 
                 请严格按照以下规则生成3个菜谱：
                 1. 只能使用用户提供的厨具。
-                2. 【时间强制约束】这道菜的真实总耗时必须严格在 {max_time-5 if max_time>5 else 1} 到 {max_time} 分钟之间。请根据真实做法评估时间。
+                2. 【时间强制约束】这道菜的真实总耗时必须严格在 {max_time-5 if max_time>5 else 1} 到 {max_time} 分钟之间。
                 3. 绝对避开用户的忌口/过敏原。
                 4. 禁止出现油炸、明火等宿舍/出租屋高危操作。
                 5. 【重要】必须是大众熟知的家常菜。绝对禁止创意融合菜。
@@ -195,12 +204,18 @@ if st.button("生成菜谱", type="primary"):
 
                 营养分析要求：非常粗略的定性描述，禁止具体卡路里数值。
 
-                必须返回一个 JSON 数组（包含3个对象），不要包含 markdown 标记。
-                每个对象包含字段：
-                "name": "菜名", "time": 耗时(整数), "cookware": ["厨具1"], 
-                "ingredients": ["主料"], "unused_ingredients": ["剩余食材"], 
-                "seasonings": ["调料"], "steps": ["步骤"], 
-                "notes": "注意事项", "safety": "安全提示", "nutrition_notes": "营养分析"
+                【严格格式要求】：必须返回一个 JSON 对象，包含 "recipes" 字段，该字段是一个数组。
+                数组中每个对象的格式如下：
+                - "name": 字符串
+                - "time": 纯数字 (例如 10，绝对不要加 "分钟" 两个字)
+                - "cookware": 字符串数组
+                - "ingredients": 字符串数组 (只能放主料，不要把盐、油等调料放进来)
+                - "seasonings": 字符串数组 (放调料)
+                - "steps": 字符串数组
+                - "unused_ingredients": 字符串数组
+                - "notes": 字符串
+                - "safety": 字符串
+                - "nutrition_notes": 字符串
                 """
 
                 response = client.chat.completions.create(
@@ -215,7 +230,6 @@ if st.button("生成菜谱", type="primary"):
                 if isinstance(parsed, dict) and "recipes" in parsed:
                     recipes = parsed["recipes"]
                 elif isinstance(parsed, dict):
-                    # 寻找列表
                     recipes = next((v for v in parsed.values() if isinstance(v, list)), [])
                 else:
                     recipes = parsed
@@ -230,6 +244,5 @@ if st.button("生成菜谱", type="primary"):
             except Exception as e:
                 st.error(f"API 调用失败：{e}")
 
-# 渲染结果区
 if "recipes" in st.session_state and st.session_state.recipes:
     render_recipes(st.session_state.recipes, st.session_state.recipes)
