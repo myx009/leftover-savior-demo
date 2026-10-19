@@ -60,14 +60,21 @@ def save_feedback(recipe_name, action):
                 writer.writerow(["timestamp", "recipe_name", "action"])
             writer.writerow([datetime.datetime.now().isoformat(), recipe_name, action])
 
-# --- 渲染卡片函数 ---
+# --- 渲染卡片函数（增加超强容错） ---
 def render_recipes(recipes, all_recipes):
     cols = st.columns(3)
     for i, col in enumerate(cols):
         with col:
             recipe = recipes[i]
-            st.subheader(recipe["name"])
-            st.caption(f"耗时: {recipe['time']}分钟 | 厨具: {', '.join(recipe['cookware'])}")
+            # 防御性提取：如果缺字段，给默认值，绝对不让页面崩溃
+            name = recipe.get("name", f"神秘菜谱 {i+1}")
+            time_str = recipe.get("time", "未知")
+            cookware_list = recipe.get("cookware", [])
+            if not isinstance(cookware_list, list): cookware_list = [str(cookware_list)]
+            cookware_str = ', '.join(cookware_list) if cookware_list else "未知"
+            
+            st.subheader(name)
+            st.caption(f"耗时: {time_str}分钟 | 厨具: {cookware_str}")
             
             st.write(f"**主料：** {', '.join(recipe.get('ingredients', []))}")
             st.write(f"**调料：** {', '.join(recipe.get('seasonings', []))}")
@@ -77,28 +84,29 @@ def render_recipes(recipes, all_recipes):
                 st.warning(f"**剩余食材：** {', '.join(unused)}（可留作下顿）")
 
             st.write("**步骤：**")
-            for step in recipe["steps"]:
+            for step in recipe.get("steps", ["暂无步骤"]):
                 st.write(step)
 
-            st.info(f"**注意事项：** {recipe['notes']}")
-            st.warning(f"**安全提示：** {recipe['safety']}")
+            st.info(f"**注意事项：** {recipe.get('notes', '无')}")
+            st.warning(f"**安全提示：** {recipe.get('safety', '无')}")
             
             nutrition = recipe.get("nutrition_notes", "未提供")
             st.success(f"**营养分析：** {nutrition}\n\n*（AI 粗略定性分析，仅供参考）*")
 
-            # 三列按钮布局：可行、不可行、换一个
+            # 三列按钮布局
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("可行", key=f"good_{i}"):
-                    save_feedback(recipe["name"], "可行")
-                    st.toast(f"已反馈：{recipe['name']} 可行")
+                    save_feedback(name, "可行")
+                    st.toast(f"已反馈：{name} 可行")
             with col2:
                 if st.button("不可行", key=f"bad_{i}"):
-                    save_feedback(recipe["name"], "不可行")
-                    st.toast(f"已反馈：{recipe['name']} 不可行")
+                    save_feedback(name, "不可行")
+                    st.toast(f"已反馈：{name} 不可行")
             with col3:
                 if st.button("换一个 🔄", key=f"change_{i}"):
-                    blacklist = [r["name"] for r in all_recipes if r["name"] != recipe["name"]]
+                    # 收集黑名单
+                    blacklist = [r.get("name", "") for r in all_recipes if r.get("name") != name]
                     blacklist += st.session_state.history_recipes
                     blacklist_str = "、".join(list(set(blacklist)))
 
@@ -109,13 +117,13 @@ def render_recipes(recipes, all_recipes):
                             你是一个家常菜谱生成助手。用户现有食材：{ingredients}。
                             可用厨具：{', '.join(cookware)}。最长烹饪时间：{max_time}分钟。忌口：{dietary}。
                             
-                            现在用户想换掉这道菜：【{recipe['name']}】。
+                            现在用户想换掉这道菜：【{name}】。
                             绝对禁止生成以下黑名单中的菜品：{blacklist_str}。
                             
                             要求：
                             1. 生成1个全新的家常菜，耗时在 {max_time-5 if max_time>5 else 1}-{max_time} 分钟之间。
                             2. 必须使用可用厨具，无高危操作。
-                            3. 必须返回 JSON 格式，如 {{"recipe": {{"name": "菜名", "time": 10, ...}}}}，请包含完整字段。
+                            3. 必须返回 JSON 格式，包含完整字段（name, time, cookware, ingredients, steps等）。
                             """
                             res = client.chat.completions.create(
                                 model=model_name,
@@ -124,25 +132,28 @@ def render_recipes(recipes, all_recipes):
                                 temperature=0.8
                             )
                             
-                            # 解析 JSON 并清洗大模型加的外壳
                             parsed_new = json.loads(res.choices[0].message.content)
                             
-                            # 寻找包含 "name" 字段的那一层字典
+                            # 深度清洗：寻找包含 "name" 的那一层字典
                             new_recipe = parsed_new
-                            if isinstance(parsed_new, dict) and "name" not in parsed_new:
-                                for val in parsed_new.values():
-                                    if isinstance(val, dict) and "name" in val:
-                                        new_recipe = val
-                                        break
+                            if isinstance(parsed_new, dict):
+                                if "name" not in parsed_new:
+                                    for val in parsed_new.values():
+                                        if isinstance(val, dict) and "name" in val:
+                                            new_recipe = val
+                                            break
+                                        elif isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict) and "name" in val[0]:
+                                            new_recipe = val[0]
+                                            break
                             
-                            # 确保字段完整，防止 KeyError
-                            if "name" not in new_recipe or "time" not in new_recipe:
-                                st.error("AI 返回格式异常，请重试。")
+                            # 如果依然没有 name 字段，说明模型彻底发疯，直接报错
+                            if "name" not in new_recipe:
+                                st.error("AI 返回数据异常，请重试。")
                             else:
                                 st.session_state.recipes[i] = new_recipe
                                 st.session_state.history_recipes.append(new_recipe["name"])
-                                save_feedback(recipe["name"], "换一个")
-                                st.rerun() # 强制刷新页面以显示新菜谱
+                                save_feedback(name, "换一个")
+                                st.rerun() 
                         except Exception as e:
                             st.error(f"生成失败：{e}")
 
@@ -204,7 +215,8 @@ if st.button("生成菜谱", type="primary"):
                 if isinstance(parsed, dict) and "recipes" in parsed:
                     recipes = parsed["recipes"]
                 elif isinstance(parsed, dict):
-                    recipes = next(v for v in parsed.values() if isinstance(v, list))
+                    # 寻找列表
+                    recipes = next((v for v in parsed.values() if isinstance(v, list)), [])
                 else:
                     recipes = parsed
 
@@ -212,7 +224,7 @@ if st.button("生成菜谱", type="primary"):
                 st.session_state.recipes = recipes[:3]
                 
                 for r in recipes[:3]:
-                    if r["name"] not in st.session_state.history_recipes:
+                    if "name" in r and r["name"] not in st.session_state.history_recipes:
                         st.session_state.history_recipes.append(r["name"])
 
             except Exception as e:
