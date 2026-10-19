@@ -16,7 +16,7 @@ with st.sidebar:
         st.success("API Key 已自动加载")
     except Exception:
         api_key = st.text_input("API Key", type="password", help="输入 DeepSeek 或兼容 OpenAI 格式的 Key")
-
+        
     model_name = st.text_input("模型", value="deepseek-chat")
     base_url = st.text_input("Base URL", value="https://api.deepseek.com")
 
@@ -44,7 +44,6 @@ dietary = st.text_input("忌口 / 过敏（可留空）", placeholder="例如：
 
 st.divider()
 
-
 # --- 反馈落盘函数 ---
 def save_feedback(recipe_name, action):
     try:
@@ -52,7 +51,7 @@ def save_feedback(recipe_name, action):
         is_cloud = True
     except Exception:
         is_cloud = False
-
+        
     if not is_cloud:
         file_exists = os.path.isfile("feedback.csv")
         with open("feedback.csv", "a", newline="", encoding="utf-8-sig") as f:
@@ -60,7 +59,6 @@ def save_feedback(recipe_name, action):
             if not file_exists:
                 writer.writerow(["timestamp", "recipe_name", "action"])
             writer.writerow([datetime.datetime.now().isoformat(), recipe_name, action])
-
 
 # --- 渲染卡片函数 ---
 def render_recipes(recipes, all_recipes):
@@ -70,10 +68,10 @@ def render_recipes(recipes, all_recipes):
             recipe = recipes[i]
             st.subheader(recipe["name"])
             st.caption(f"耗时: {recipe['time']}分钟 | 厨具: {', '.join(recipe['cookware'])}")
-
+            
             st.write(f"**主料：** {', '.join(recipe.get('ingredients', []))}")
             st.write(f"**调料：** {', '.join(recipe.get('seasonings', []))}")
-
+            
             unused = recipe.get("unused_ingredients", [])
             if unused:
                 st.warning(f"**剩余食材：** {', '.join(unused)}（可留作下顿）")
@@ -84,7 +82,7 @@ def render_recipes(recipes, all_recipes):
 
             st.info(f"**注意事项：** {recipe['notes']}")
             st.warning(f"**安全提示：** {recipe['safety']}")
-
+            
             nutrition = recipe.get("nutrition_notes", "未提供")
             st.success(f"**营养分析：** {nutrition}\n\n*（AI 粗略定性分析，仅供参考）*")
 
@@ -100,10 +98,9 @@ def render_recipes(recipes, all_recipes):
                     st.toast(f"已反馈：{recipe['name']} 不可行")
             with col3:
                 if st.button("换一个 🔄", key=f"change_{i}"):
-                    # 收集当前已经存在和其他菜的名字，作为黑名单
                     blacklist = [r["name"] for r in all_recipes if r["name"] != recipe["name"]]
                     blacklist += st.session_state.history_recipes
-                    blacklist_str = "、".join(list(set(blacklist)))  # 去重
+                    blacklist_str = "、".join(list(set(blacklist)))
 
                     with st.spinner("正在换新菜..."):
                         try:
@@ -111,14 +108,14 @@ def render_recipes(recipes, all_recipes):
                             change_prompt = f"""
                             你是一个家常菜谱生成助手。用户现有食材：{ingredients}。
                             可用厨具：{', '.join(cookware)}。最长烹饪时间：{max_time}分钟。忌口：{dietary}。
-
+                            
                             现在用户想换掉这道菜：【{recipe['name']}】。
                             绝对禁止生成以下黑名单中的菜品：{blacklist_str}。
-
+                            
                             要求：
-                            1. 生成1个全新的家常菜，耗时在 {max_time - 5 if max_time > 5 else 1}-{max_time} 分钟之间。
+                            1. 生成1个全新的家常菜，耗时在 {max_time-5 if max_time>5 else 1}-{max_time} 分钟之间。
                             2. 必须使用可用厨具，无高危操作。
-                            3. 必须返回 JSON，只包含一个对象（不要数组），格式与之前一致。
+                            3. 必须返回 JSON 格式，如 {{"recipe": {{"name": "菜名", "time": 10, ...}}}}，请包含完整字段。
                             """
                             res = client.chat.completions.create(
                                 model=model_name,
@@ -126,16 +123,28 @@ def render_recipes(recipes, all_recipes):
                                 response_format={"type": "json_object"},
                                 temperature=0.8
                             )
-                            new_recipe = json.loads(res.choices[0].message.content)
-
-                            # 替换数据并重新渲染
-                            st.session_state.recipes[i] = new_recipe
-                            st.session_state.history_recipes.append(new_recipe["name"])
-                            save_feedback(recipe["name"], "换一个")
-                            st.rerun()  # 强制刷新页面以显示新菜谱
+                            
+                            # 解析 JSON 并清洗大模型加的外壳
+                            parsed_new = json.loads(res.choices[0].message.content)
+                            
+                            # 寻找包含 "name" 字段的那一层字典
+                            new_recipe = parsed_new
+                            if isinstance(parsed_new, dict) and "name" not in parsed_new:
+                                for val in parsed_new.values():
+                                    if isinstance(val, dict) and "name" in val:
+                                        new_recipe = val
+                                        break
+                            
+                            # 确保字段完整，防止 KeyError
+                            if "name" not in new_recipe or "time" not in new_recipe:
+                                st.error("AI 返回格式异常，请重试。")
+                            else:
+                                st.session_state.recipes[i] = new_recipe
+                                st.session_state.history_recipes.append(new_recipe["name"])
+                                save_feedback(recipe["name"], "换一个")
+                                st.rerun() # 强制刷新页面以显示新菜谱
                         except Exception as e:
                             st.error(f"生成失败：{e}")
-
 
 # --- 初始化历史记录 ---
 if "history_recipes" not in st.session_state:
@@ -153,8 +162,7 @@ if st.button("生成菜谱", type="primary"):
         with st.spinner("AI 正在根据你的库存和约束生成家常菜..."):
             try:
                 client = OpenAI(api_key=api_key, base_url=base_url)
-                history_str = "、".join(
-                    st.session_state.history_recipes[-10:]) if st.session_state.history_recipes else "无"
+                history_str = "、".join(st.session_state.history_recipes[-10:]) if st.session_state.history_recipes else "无"
 
                 prompt = f"""
                 你是一个专为独居人士设计的家常菜谱生成助手。
@@ -162,12 +170,12 @@ if st.button("生成菜谱", type="primary"):
                 可用厨具：{', '.join(cookware)}
                 最长烹饪时间限制：{max_time}分钟
                 忌口/过敏：{dietary if dietary else '无'}
-
+                
                 【历史已推荐菜品】：{history_str}
 
                 请严格按照以下规则生成3个菜谱：
                 1. 只能使用用户提供的厨具。
-                2. 【时间强制约束】这道菜的真实总耗时必须严格在 {max_time - 5 if max_time > 5 else 1} 到 {max_time} 分钟之间。请根据真实做法评估时间。
+                2. 【时间强制约束】这道菜的真实总耗时必须严格在 {max_time-5 if max_time>5 else 1} 到 {max_time} 分钟之间。请根据真实做法评估时间。
                 3. 绝对避开用户的忌口/过敏原。
                 4. 禁止出现油炸、明火等宿舍/出租屋高危操作。
                 5. 【重要】必须是大众熟知的家常菜。绝对禁止创意融合菜。
@@ -202,7 +210,7 @@ if st.button("生成菜谱", type="primary"):
 
                 st.success("AI 生成成功！")
                 st.session_state.recipes = recipes[:3]
-
+                
                 for r in recipes[:3]:
                     if r["name"] not in st.session_state.history_recipes:
                         st.session_state.history_recipes.append(r["name"])
